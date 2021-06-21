@@ -1,0 +1,25 @@
+on:
+  schedule:
+    - cron:  '0 0 * * *'
+
+  workflow_dispatch:  # click the button on Github repo!
+
+
+jobs:
+  sync_with_upstream:
+    runs-on: ubuntu-latest
+    name: Sync main with upstream
+
+    steps:
+    - name: Checkout to master branch
+      uses: actions/checkout@v2
+      with:
+        ref: master
+    - name: Pull (Fast-Forward) upstream changes
+      id: sync
+      uses: aormsby/Fork-Sync-With-Upstream-action@v2.1
+      with:
+        upstream_repository: ClusterLabs/ha_cluster_exporter
+        upstream_branch: master
+        target_branch: master
+        git_pull_args: --allow-unrelated-histories --rebase=merges  -ff
