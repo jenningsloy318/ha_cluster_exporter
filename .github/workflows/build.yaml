@@ -17,7 +17,7 @@ jobs:
         ref: master
     - name: Pull (Fast-Forward) upstream changes
       id: sync
-      uses: aormsby/Fork-Sync-With-Upstream-action@latest
+      uses: aormsby/Fork-Sync-With-Upstream-action@2.3
       with:
         upstream_repository: ClusterLabs/ha_cluster_exporter
         upstream_branch: master
