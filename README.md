@@ -1,6 +1,7 @@
 # ha_cluster_exporter
 
-[![Build Status](https://travis-ci.org/ClusterLabs/ha_cluster_exporter.svg?branch=master)](https://travis-ci.org/ClusterLabs/ha_cluster_exporter)
+[![Exporter CI](https://github.com/ClusterLabs/ha_cluster_exporter/workflows/Exporter%20CI/badge.svg)](https://github.com/ClusterLabs/ha_cluster_exporter/actions?query=workflow%3A%22Exporter+CI%22)
+[![Dashboards CI](https://github.com/ClusterLabs/ha_cluster_exporter/workflows/Dashboards%20CI/badge.svg)](https://github.com/ClusterLabs/ha_cluster_exporter/actions?query=workflow%3A%22Dashboards+CI%22)
 
 This is a bespoke Prometheus exporter used to enable the monitoring of Pacemaker based HA clusters.  
 
@@ -9,6 +10,7 @@ This is a bespoke Prometheus exporter used to enable the monitoring of Pacemaker
 2. [Installation](#installation)
 3. [Usage](#usage)
    1. [Metrics](doc/metrics.md)
+   2. [Dashboards](dashboards/README.md)
 5. [Contributing](#contributing)
    1. [Design](doc/design.md)
    2. [Development](doc/development.md)
@@ -21,7 +23,6 @@ The exporter is a stateless HTTP endpoint. On each HTTP request, it locally insp
 Exported data include:
 - Pacemaker cluster summary, nodes and resources stats 
 - Corosync ring errors and quorum votes
-  (note: only Corosync version 2 is supported)
 - SBD devices health status 
 - DRBD resources and connections stats  
   (note: only DBRD v9 is supported; for v8.4, please refer to the [Prometheus Node Exporter](https://github.com/prometheus/node_exporter) project)
@@ -52,13 +53,13 @@ go get github.com/ClusterLabs/ha_cluster_exporter
 ```
 
 ### RPM
-You can find the repositories for RPM based distributions in [SUSE's Open Build Service](https://build.opensuse.org/package/show/server:monitoring/prometheus-ha_cluster_exporter).  
+
 On openSUSE or SUSE Linux Enterprise you can just use the `zypper` system package manager:
 ```shell
-export DISTRO=SLE_15_SP1 # change as desired
-zypper addrepo https://download.opensuse.org/repositories/server:/monitoring/$DISTRO/server:monitoring.repo
 zypper install prometheus-ha_cluster_exporter
 ```
+
+You can find the latest development repositories at [SUSE's Open Build Service](https://build.opensuse.org/package/show/network:ha-clustering:sap-deployments:devel/prometheus-ha_cluster_exporter).
 
 ## Usage
 
@@ -78,6 +79,8 @@ A warning message will inform the user of such cases.
 
 Please, refer to [doc/metrics.md](doc/metrics.md) for extensive details about all the exported metrics.
 
+To see a practical example of how to consume the metrics, we also provide a couple of [Grafana dashboards](dashboards). 
+
 **Hint:**
 You can deploy a full HA Cluster via Terraform with [SUSE/ha-sap-terraform-deployments](https://github.com/SUSE/ha-sap-terraform-deployments).
 
@@ -95,6 +98,47 @@ The first match has precedence, and the CLI flags have precedence over the confi
 
 Please refer to the example [YAML configuration](ha_cluster_exporter.yaml) for more details.
 
+Additional CLI flags can also be passed via `/etc/sysconfig/prometheus-ha_cluster_exporter`.
+
+#### General Flags
+
+Name                                       | Description
+----                                       | -----------
+web.listen-address                         | Address to listen on for web interface and telemetry (default `:9664`).
+web.telemetry-path                         | Path under which to expose metrics (default `/metrics`).
+web.config.file                            | Path to a [web configuration file](#tls-and-basic-authentication) (default `/etc/ha_cluster_exporter.web.yaml`).
+log.level                                  | Logging verbosity (default `info`).
+version                                    | Print the version information.
+
+##### Deprecated Flags
+Name                                       | Description
+----                                       | -----------
+address                                    | deprecated: please use --web.listen-address or --web.config.file to use Prometheus Exporter Toolkit
+port                                       | deprecated: please use --web.listen-address or --web.config.file to use Prometheus Exporter Toolkit
+log-level                                  | deprecated: please use log.level
+enable-timestamps                          | deprecated: server-side metric timestamping is discouraged by Prometheus best-practices and should be avoided
+
+#### Collector Flags
+
+Name                                       | Description
+----                                       | -----------
+crm-mon-path                               | Path to crm_mon executable (default `/usr/sbin/crm_mon`).
+cibadmin-path                              | Path to cibadmin executable (default `/usr/sbin/cibadmin`).
+corosync-cfgtoolpath-path                  | Path to corosync-cfgtool executable (default `/usr/sbin/corosync-cfgtool`).
+corosync-quorumtool-path                   | Path to corosync-quorumtool executable (default `/usr/sbin/corosync-quorumtool`).
+sbd-path                                   | Path to sbd executable (default `/usr/sbin/sbd`).
+sbd-config-path                            | Path to sbd configuration (default `/etc/sysconfig/sbd`).
+drbdsetup-path                             | Path to drbdsetup executable (default `/sbin/drbdsetup`).
+drbdsplitbrain-path                        | Path to drbd splitbrain hooks temporary files (default `/var/run/drbd/splitbrain`).
+
+### TLS and basic authentication
+
+The ha_cluster_exporter supports TLS and basic authentication.
+
+To use TLS and/or basic authentication, you need to pass a configuration file
+using the `--web.config.file` parameter. The format of the file is described
+[in the exporter-toolkit repository](https://github.com/prometheus/exporter-toolkit/blob/master/docs/web-configuration.md).
+
 ### systemd integration
 
 A [systemd unit file](ha_cluster_exporter.service) is provided with the RPM packages. You can enable and start it as usual:  
@@ -111,7 +155,7 @@ We recommend having a look at the [design document](doc/design.md) and the [deve
 
 ## License
 
-Copyright 2019-2020 SUSE LLC
+Copyright 2019-2022 SUSE LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

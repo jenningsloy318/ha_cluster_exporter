@@ -1,80 +1,131 @@
-# this is the what ends up in the RPM "Version" field and it is also used as suffix for the built binaries
-# if you want to commit to OBS it must be a remotely available Git reference
-VERSION ?= $(shell git rev-parse --short HEAD)
+GO    := GO111MODULE=on go
+FIRST_GOPATH := $(firstword $(subst :, ,$(shell $(GO) env GOPATH)))
+GOHOSTOS     ?= $(shell $(GO) env GOHOSTOS)
+GOHOSTARCH   ?= $(shell $(GO) env GOHOSTARCH)
+ifeq (arm, $(GOHOSTARCH))
+	GOHOSTARM ?= $(shell GOARM= $(GO) env GOARM)
+	GO_BUILD_PLATFORM ?= $(GOHOSTOS)-$(GOHOSTARCH)v$(GOHOSTARM)
+else
+	GO_BUILD_PLATFORM ?= $(GOHOSTOS)-$(GOHOSTARCH)
+endif
+PROMU        := $(FIRST_GOPATH)/bin/promu
+PROMU_VERSION ?= 0.13.0
+PROMU_URL     := https://github.com/prometheus/promu/releases/download/v$(PROMU_VERSION)/promu-$(PROMU_VERSION).$(GO_BUILD_PLATFORM).tar.gz
+
+# this is the what ends up in the RPM "Version" field and embedded in the --version CLI flag
+VERSION ?= $(shell .ci/get_version_from_git.sh)
+
+# if you want to release to OBS, this must be a remotely available Git reference
+REVISION ?= $(shell git rev-parse --abbrev-ref HEAD)
 
 # we only use this to comply with RPM changelog conventions at SUSE
 AUTHOR ?= shap-staff@suse.de
 
 # you can customize any of the following to build forks
-OBS_PROJECT ?= server:monitoring
-OBS_PACKAGE ?= prometheus-ha_cluster_exporter
+OBS_PROJECT ?= network:ha-clustering:sap-deployments:devel
 REPOSITORY ?= clusterlabs/ha_cluster_exporter
 
 # the Go archs we crosscompile to
 ARCHS ?= amd64 arm64 ppc64le s390x
 
-default: clean download mod-tidy fmt vet-check test build
+default: clean mod-tidy generate fmt vet-check test build
 
-download:
-	go mod download
-	go mod verify
+promu-prepare: 
+	sed "s/{{.Version}}/$(VERSION)/" .promu.yml >.promu.release.yml
+	mkdir -p build/bin
 
-build: amd64
+# from https://github.com/prometheus/prometheus/blob/main/Makefile.common
+$(PROMU):
+	$(eval PROMU_TMP := $(shell mktemp -d))
+	curl -s -L $(PROMU_URL) | tar -xvzf - -C $(PROMU_TMP)
+	mkdir -p $(FIRST_GOPATH)/bin
+	cp $(PROMU_TMP)/promu-$(PROMU_VERSION).$(GO_BUILD_PLATFORM)/promu $(FIRST_GOPATH)/bin/promu
+	rm -r $(PROMU_TMP)
 
-build-all: clean-bin $(ARCHS)
+build:
+	$(MAKE) clean
+	$(MAKE) promu-prepare $(PROMU)
+	$(MAKE) amd64
+
+build-all:
+	$(MAKE) clean
+	$(MAKE) promu-prepare $(PROMU)
+	$(MAKE) $(ARCHS)
 
 $(ARCHS):
-	@mkdir -p build/bin
-	CGO_ENABLED=0 GOOS=linux GOARCH=$@ go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o build/bin/ha_cluster_exporter-$(VERSION)-$@
+	GOOS=linux GOARCH=$@ $(PROMU) build --config .promu.release.yml --prefix=build/bin ha_cluster_exporter-$@
 
 install:
-	go install
+	$(GO) install
 
 static-checks: vet-check fmt-check
 
-vet-check: download
-	go vet ./...
+vet-check:
+	$(GO) vet ./...
 
 fmt:
-	go fmt ./...
+	$(GO) fmt ./...
 
 mod-tidy:
-	go mod tidy
+	$(GO) mod tidy
 
 fmt-check:
 	.ci/go_lint.sh
 
-test: download
-	go test -v ./...
+generate:
+	$(GO) generate ./...
+
+test:
+	$(GO) test -v ./...
+
+checks: static-checks test
 
 coverage:
-	@mkdir build
-	go test -cover -coverprofile=build/coverage ./...
-	go tool cover -html=build/coverage
+	@mkdir -p build
+	$(GO) test -cover -coverprofile=build/coverage ./...
+	$(GO) tool cover -html=build/coverage
 
-clean: clean-bin clean-obs
-	go clean
+clean:
+	$(GO) clean
 	rm -rf build
+	rm -f .promu.release.yml
 
-clean-bin:
-	rm -rf build/bin
-
-clean-obs:
-	rm -rf build/obs
-
-obs-workdir: clean-obs
-	@mkdir -p build/obs
-	osc checkout $(OBS_PROJECT) $(OBS_PACKAGE) -o build/obs
-	rm -f build/obs/*.tar.gz
-	cp -rv packaging/obs/* build/obs/
+exporter-obs-workdir: build/obs/prometheus-ha_cluster_exporter
+build/obs/prometheus-ha_cluster_exporter:
+	@mkdir -p $@
+	osc checkout $(OBS_PROJECT) prometheus-ha_cluster_exporter -o $@
+	rm -f $@/*.tar.gz
+	cp -rv packaging/obs/prometheus-ha_cluster_exporter/* $@/
 # we interpolate environment variables in OBS _service file so that we control what is downloaded by the tar_scm source service
-	sed -i 's~%%VERSION%%~$(VERSION)~' build/obs/_service
-	sed -i 's~%%REPOSITORY%%~$(REPOSITORY)~' build/obs/_service
-	cd build/obs; osc service runall
-	.ci/gh_release_to_obs_changeset.py $(REPOSITORY) -a $(AUTHOR) -t $(VERSION) -f build/obs/$(OBS_PACKAGE).changes || true
+	sed -i 's~%%VERSION%%~$(VERSION)~' $@/_service
+	sed -i 's~%%REVISION%%~$(REVISION)~' $@/_service
+	sed -i 's~%%REPOSITORY%%~$(REPOSITORY)~' $@/_service
+	go mod vendor
+	tar --sort=name --mtime='UTC 1970-01-01' -c vendor | gzip -n > $@/vendor.tar.gz
+	cd $@; osc service manualrun
 
-obs-commit: obs-workdir
-	cd build/obs; osc addremove
-	cd build/obs; osc commit -m "Update to git ref $(VERSION)"
+exporter-obs-changelog: exporter-obs-workdir
+	.ci/gh_release_to_obs_changeset.py $(REPOSITORY) -a $(AUTHOR) -t $(REVISION) -f build/obs/prometheus-ha_cluster_exporter/prometheus-ha_cluster_exporter.changes
 
-.PHONY: default download install static-checks vet-check fmt fmt-check mod-tidy test coverage clean clean-bin clean-obs build build-all obs-commit obs-workdir $(ARCHS)
+exporter-obs-commit: exporter-obs-workdir
+	cd build/obs/prometheus-ha_cluster_exporter; osc addremove
+	cd build/obs/prometheus-ha_cluster_exporter; osc commit -m "Update from git rev $(REVISION)"
+
+dashboards-obs-workdir: build/obs/grafana-ha-cluster-dashboards
+build/obs/grafana-ha-cluster-dashboards:
+	@mkdir -p $@
+	osc checkout $(OBS_PROJECT) grafana-ha-cluster-dashboards -o $@
+	rm -f $@/*.tar.gz
+	cp -rv packaging/obs/grafana-ha-cluster-dashboards/* $@/
+# we interpolate environment variables in OBS _service file so that we control what is downloaded by the tar_scm source service
+	sed -i 's~%%REVISION%%~$(REVISION)~' $@/_service
+	sed -i 's~%%REPOSITORY%%~$(REPOSITORY)~' $@/_service
+	cd $@; osc service manualrun
+
+dashboards-obs-commit: dashboards-obs-workdir
+	cd build/obs/grafana-ha-cluster-dashboards; osc addremove
+	cd build/obs/grafana-ha-cluster-dashboards; osc commit -m "Update from git rev $(REVISION)"
+
+.PHONY: $(ARCHS) build build-all checks clean coverage dashboards-obs-commit dashboards-obs-workdir default download \
+		exporter-obs-changelog exporter-obs-commit exporter-obs-workdir fmt fmt-check generate install mod-tidy \
+		static-checks test vet-check

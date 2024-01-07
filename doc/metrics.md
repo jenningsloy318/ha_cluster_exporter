@@ -5,9 +5,6 @@ This document describes the metrics exposed by `ha_cluster_exporter`.
 General notes:
 - All the metrics are _namespaced_ with the prefix `ha_cluster`, which is followed by a _subsystem_, and both are in turn composed into a _Fully Qualified Name_ (FQN) of each metrics.
 - All the metrics and labels _names_ are in snake_case, as conventional with Prometheus. That said, as much as we'll try to keep this consistent throughout the project, the label _values_ may not actually follow this convention, though (e.g. value is a hostname).
-- Some metrics, like `ha_cluster_pacemaker_nodes`, `ha_cluster_pacemaker_resources`, share common traits:
-  - their labels contain the relevant data you may want to track or use for aggregation and filtering;
-  - either their value is `1`, or the line is absent altogether; this is because each line represents one entity of the cluster, but the exporter itself is stateless, i.e. we don't track the life-cycle of entities that do not exist anymore in the cluster.
 
 - If the `enable-timestamps` option is on, all the metrics will be timestamped with the Unix epoch time in milliseconds.
 
@@ -17,6 +14,7 @@ These are the currently implemented subsystems.
 2. [Corosync](#corosync)
 3. [SBD](#sbd)
 4. [DRBD](#drbd)
+5. [Scrape](#scrape)
 
 
 ## Pacemaker 
@@ -29,8 +27,9 @@ The Pacemaker subsystem collects an atomic snapshot of the HA cluster directly f
 3. [`ha_cluster_pacemaker_location_constraints`](#ha_cluster_pacemaker_location_constraints)
 4. [`ha_cluster_pacemaker_migration_threshold`](#ha_cluster_pacemaker_migration_threshold)
 5. [`ha_cluster_pacemaker_nodes`](#ha_cluster_pacemaker_nodes)
-6. [`ha_cluster_pacemaker_resources`](#ha_cluster_pacemaker_resources)
-7. [`ha_cluster_pacemaker_stonith_enabled`](#ha_cluster_pacemaker_stonith_enabled)
+6. [`ha_cluster_pacemaker_node_attributes`](#ha_cluster_pacemaker_node_attributes)
+7. [`ha_cluster_pacemaker_resources`](#ha_cluster_pacemaker_resources)
+8. [`ha_cluster_pacemaker_stonith_enabled`](#ha_cluster_pacemaker_stonith_enabled)
 
 
 ### `ha_cluster_pacemaker_config_last_change`
@@ -78,8 +77,8 @@ Possible values are positive numbers.
 
 #### Description
 
-The nodes in the cluster; one line per `node`, per `status`.  
-Either the value is `1`, or the line is absent altogether.
+The status of each node in the cluster; it will have one line for each possible `status` of each `node`.
+A value of `1` means the node is in the status specified by the `status` label, a value of `0` means it is not.
 
 #### Labels
 
@@ -87,26 +86,38 @@ Either the value is `1`, or the line is absent altogether.
 - `status`: one of `online|standby|standby_onfail|maintanance|pending|unclean|shutdown|expected_up|dc`. 
 - `type`: one of `member|ping|remote`.
 
-The total number of lines for this metric will be the cardinality of `name` times the cardinality of `status`.
+
+### `ha_cluster_pacemaker_node_attributes`
+
+#### Description
+
+This metric exposes in its labels raw, opaque, cluster metadata, called node attributes, which often leveraged by Resource Agents.  
+The value of each line will always be `1`.
+
+#### Labels
+
+- `node`: name of the node (usually the hostname).
+- `name`: name of the attribute.
+- `value`: value of the attribute.
 
 
 ### `ha_cluster_pacemaker_resources` 
 
 #### Description
 
-The resources in the cluster; one line per `id`, per `status`.  
-Either the value is `1`, or the line is absent altogether.
+The status of each resource in the cluster; it will have one line for each possible `status` of each `resource`.  
+A value of `1` means the resource is in the status specified by the `status` label, a value of `0` means it is not.
 
 #### Labels
 
 - `agent`: the name of the resource agent for this resource.
+- `clone`: the name of the clone this resource belongs to, if any.
+- `group`: the name of the group this resource belongs to, if any.
 - `managed`: either `true` or `false`.
 - `node`: the name of the node hosting the resource.
 - `resource`: the unique resource name.
 - `role`:  one of `started|stopped|master|slave` or one of `starting|stopping|migrating|promoting|demoting`.
 - `status`: one of `active|orphaned|blocked|failed|failure_ignored`.
-
-The total number of lines for this metric will be the cardinality of `id` times the cardinality of `status`.
 
 
 ### `ha_cluster_pacemaker_stonith_enabled`
@@ -122,9 +133,24 @@ Value is either `1` or `0`.
 The Corosync subsystem collects cluster quorum votes and ring status by parsing the output of `corosync-quorumtool` and `corosync-cfgtool`.
 
 0. [Sample](../test/corosync.metrics)
-1. [`ha_cluster_corosync_quorate`](#ha_cluster_corosync_quorate)
-2. [`ha_cluster_corosync_quorum_votes`](#ha_cluster_corosync_quorum_votes)
-3. [`ha_cluster_corosync_ring_errors`](#ha_cluster_corosync_ring_errors)
+1. [`ha_cluster_corosync_member_votes`](#ha_cluster_corosync_member_votes)
+2. [`ha_cluster_corosync_quorate`](#ha_cluster_corosync_quorate)
+3. [`ha_cluster_corosync_quorum_votes`](#ha_cluster_corosync_quorum_votes)
+4. [`ha_cluster_corosync_ring_errors`](#ha_cluster_corosync_ring_errors)
+5. [`ha_cluster_corosync_rings`](#ha_cluster_corosync_rings)
+
+
+### `ha_cluster_corosync_member_votes`
+
+#### Description
+
+How many votes each member node has contributed with to the current quorum
+
+#### Labels
+
+- `node_id`: the internal corosync identifier associated to this node.
+- `node`: the name of the node; usually the hostname.
+- `local`: whether or not this is the local node.
 
 
 ### `ha_cluster_corosync_quorate`
@@ -150,7 +176,21 @@ Cluster quorum votes; one line per type.
 
 #### Description
 
-The number of corosync ring errors.
+The total number of faulty corosync rings.
+
+
+### `ha_cluster_corosync_rings`
+
+#### Description
+
+The status of each Corosync ring; `1` means healthy, `0` means faulty.
+
+#### Labels
+
+- `ring_id`: the internal Corosync ring identifier; usually corresponds to the first member node to join.  
+- `node_id`: the internal Corosync identifier of the local node.
+- `number`: the ring number.
+- `address`: the IP address locally linked to this ring.
 
 
 ## SBD
@@ -158,7 +198,8 @@ The number of corosync ring errors.
 The SBD subsystems collect devices stats by parsing its configuration and the output of `sbd --dump`.
 
 0. [Sample](../test/sbd.metrics)
-2. [`ha_cluster_sbd_devices`](#ha_cluster_sbd_devices)
+1. [`ha_cluster_sbd_devices`](#ha_cluster_sbd_devices)
+2. [`ha_cluster_sbd_timeouts`](#ha_cluster_sbd_timeouts)
 
 ### `ha_cluster_sbd_devices`
 
@@ -173,6 +214,18 @@ Either the value is `1`, or the line is absent altogether.
 - `status`: one of `healthy|unhealthy`
 
 The total number of lines for this metric will be the cardinality of `device`.
+
+### `ha_cluster_sbd_timeouts`
+
+#### Description
+
+The SBD timeouts pro SBD device
+Value is an integer expessing the timeout
+
+#### Labels
+
+- `device`: the path of the SBD device
+- `type`:  either `watchdog` or `msgwait`
 
 
 ## DRBD
@@ -409,3 +462,46 @@ Refer to upstream doc: https://docs.linbit.com/docs/users-guide-8.4/#s-configure
 It is important for the exporter that he hook should create the files in that location and naming. 
 
 Remember to remove the files manually after the split brain is solved
+
+
+## Scrape
+
+The `scrape` subsystem is a generic namespace dedicated to internal instrumentation of the exporter itself.
+
+1. [`ha_cluster_scrape_duration_seconds`](#ha_cluster_scrape_duration_seconds)
+2. [`ha_cluster_scrape_success`](#ha_cluster_scrape_success)
+
+### `ha_cluster_scrape_duration_seconds`
+
+The duration of a collector scrape in seconds. 
+
+#### Labels
+
+- `collector`: collector names correspond to the subsystem they collect metrics from.
+
+#### Example
+
+```
+# TYPE ha_cluster_scrape_duration_seconds gauge
+ha_cluster_scrape_duration_seconds{collector="pacemaker"} 1.234
+```
+
+### `ha_cluster_scrape_success`
+
+Whether a collector succeeded. 
+
+Collectors may gracefully fail, but this won't prevent them from continuing running. 
+
+If some metrics could not be scraped, the value of this metric will be `0`.  
+In such cases, you shall find more details in the exporter logs. 
+
+#### Labels
+
+- `collector`: collector names correspond to the subsystem they collect metrics from.
+
+#### Examaple
+
+```
+# TYPE ha_cluster_scrape_success gauge
+ha_cluster_scrape_success{collector="pacemaker"} 1
+```

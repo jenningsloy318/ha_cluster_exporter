@@ -6,37 +6,49 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
-	log "github.com/sirupsen/logrus"
 
 	"github.com/ClusterLabs/ha_cluster_exporter/collector"
 )
 
+const subsystem = "sbd"
+
 const SBD_STATUS_UNHEALTHY = "unhealthy"
 const SBD_STATUS_HEALTHY = "healthy"
 
-func NewCollector(sbdPath string, sbdConfigPath string) (*sbdCollector, error) {
-	err := collector.CheckExecutables(sbdPath)
+// NewCollector create a new sbd collector
+func NewCollector(sbdPath string, sbdConfigPath string, timestamps bool, logger log.Logger) (*sbdCollector, error) {
+	err := checkArguments(sbdPath, sbdConfigPath)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not initialize SBD collector")
-	}
-
-	if _, err := os.Stat(sbdConfigPath); os.IsNotExist(err) {
-		return nil, errors.Errorf("could not initialize SBD collector: '%s' does not exist", sbdConfigPath)
+		return nil, errors.Wrapf(err, "could not initialize '%s' collector", subsystem)
 	}
 
 	c := &sbdCollector{
-		collector.NewDefaultCollector("sbd"),
+		collector.NewDefaultCollector(subsystem, timestamps, logger),
 		sbdPath,
 		sbdConfigPath,
 	}
 
 	c.SetDescriptor("devices", "SBD devices; one line per device", []string{"device", "status"})
+	c.SetDescriptor("timeouts", "SBD timeouts for each device and type", []string{"device", "type"})
 
 	return c, nil
+}
+
+func checkArguments(sbdPath string, sbdConfigPath string) error {
+	if err := collector.CheckExecutables(sbdPath); err != nil {
+		return err
+	}
+	if _, err := os.Stat(sbdConfigPath); os.IsNotExist(err) {
+		return errors.Errorf("'%s' does not exist", sbdConfigPath)
+	}
+	return nil
 }
 
 type sbdCollector struct {
@@ -45,13 +57,12 @@ type sbdCollector struct {
 	sbdConfigPath string
 }
 
-func (c *sbdCollector) Collect(ch chan<- prometheus.Metric) {
-	log.Debugln("Collecting SBD metrics...")
+func (c *sbdCollector) CollectWithError(ch chan<- prometheus.Metric) error {
+	level.Debug(c.Logger).Log("msg", "Collecting pacemaker metrics...")
 
 	sbdConfiguration, err := readSdbFile(c.sbdConfigPath)
 	if err != nil {
-		log.Warnf("SBD Collector scrape failed: %s", err)
-		return
+		return err
 	}
 
 	sbdDevices := getSbdDevices(sbdConfiguration)
@@ -59,6 +70,26 @@ func (c *sbdCollector) Collect(ch chan<- prometheus.Metric) {
 	sbdStatuses := c.getSbdDeviceStatuses(sbdDevices)
 	for sbdDev, sbdStatus := range sbdStatuses {
 		ch <- c.MakeGaugeMetric("devices", 1, sbdDev, sbdStatus)
+	}
+
+	sbdWatchdogs, sbdMsgWaits := c.getSbdTimeouts(sbdDevices)
+	for sbdDev, sbdWatchdog := range sbdWatchdogs {
+		ch <- c.MakeGaugeMetric("timeouts", sbdWatchdog, sbdDev, "watchdog")
+	}
+
+	for sbdDev, sbdMsgWait := range sbdMsgWaits {
+		ch <- c.MakeGaugeMetric("timeouts", sbdMsgWait, sbdDev, "msgwait")
+	}
+
+	return nil
+}
+
+func (c *sbdCollector) Collect(ch chan<- prometheus.Metric) {
+	level.Debug(c.Logger).Log("msg", "Collecting pacemaker metrics...")
+
+	err := c.CollectWithError(ch)
+	if err != nil {
+		level.Warn(c.Logger).Log("msg", c.GetSubsystem()+" collector scrape failed", "err", err)
 	}
 }
 
@@ -85,7 +116,7 @@ func getSbdDevices(sbdConfigRaw []byte) []string {
 	// Unbalanced double quotes are not checked and they will still produce a match
 	// If multiple matching lines are present, only the first will be used
 	// The single device name pattern is `[\w-/]+`, which is pretty relaxed
-	regex := regexp.MustCompile(`(?m)^\s*SBD_DEVICE="?((?:[\w-/]+;?)+)"?\s*$`)
+	regex := regexp.MustCompile(`(?m)^\s*SBD_DEVICE="?((?:[\w-/]+;?\s?)+)"?\s*$`)
 	sbdDevicesLine := regex.FindStringSubmatch(string(sbdConfigRaw))
 
 	// if SBD_DEVICE line could not be found, return 0 devices
@@ -94,7 +125,10 @@ func getSbdDevices(sbdConfigRaw []byte) []string {
 	}
 
 	// split the first capture group, e.g. `/dev/foo;/dev/bar`; the 0th element is always the whole line
-	sbdDevices := strings.Split(sbdDevicesLine[1], ";")
+	sbdDevices := strings.Split(strings.TrimRight(sbdDevicesLine[1], ";"), ";")
+	for i, _ := range sbdDevices {
+		sbdDevices[i] = strings.TrimSpace(sbdDevices[i])
+	}
 
 	return sbdDevices
 }
@@ -115,4 +149,40 @@ func (c *sbdCollector) getSbdDeviceStatuses(sbdDevices []string) map[string]stri
 	}
 
 	return sbdStatuses
+}
+
+// for each sbd device, extract the watchdog and msgwait timeout via regex
+func (c *sbdCollector) getSbdTimeouts(sbdDevices []string) (map[string]float64, map[string]float64) {
+	sbdWatchdogs := make(map[string]float64)
+	sbdMsgWaits := make(map[string]float64)
+	for _, sbdDev := range sbdDevices {
+		sbdDump, _ := exec.Command(c.sbdPath, "-d", sbdDev, "dump").Output()
+
+		regexW := regexp.MustCompile(`Timeout \(msgwait\)  *: \d+`)
+		regex := regexp.MustCompile(`Timeout \(watchdog\)  *: \d+`)
+
+		msgWaitLine := regexW.FindStringSubmatch(string(sbdDump))
+		watchdogLine := regex.FindStringSubmatch(string(sbdDump))
+
+		if watchdogLine == nil || msgWaitLine == nil {
+			continue
+		}
+
+		// get the timeout from the line
+		regexNumber := regexp.MustCompile(`\d+`)
+		watchdogTimeout := regexNumber.FindString(string(watchdogLine[0]))
+		msgWaitTimeout := regexNumber.FindString(string(msgWaitLine[0]))
+
+		// map the timeout to the device
+		if s, err := strconv.ParseFloat(watchdogTimeout, 64); err == nil {
+			sbdWatchdogs[sbdDev] = s
+		}
+
+		// map the timeout to the device
+		if s, err := strconv.ParseFloat(msgWaitTimeout, 64); err == nil {
+			sbdMsgWaits[sbdDev] = s
+		}
+
+	}
+	return sbdWatchdogs, sbdMsgWaits
 }

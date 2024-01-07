@@ -1,5 +1,5 @@
 #
-# Copyright 2019-2020 SUSE LLC
+# Copyright 2019-2022 SUSE LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,28 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+
 Name:           prometheus-ha_cluster_exporter
 # Version will be processed via set_version source service
 Version:        0
 Release:        0
-License:        Apache-2.0
 Summary:        Prometheus exporter for Pacemaker HA clusters metrics
+License:        Apache-2.0
 Group:          System/Monitoring
-Url:            https://github.com/ClusterLabs/ha_cluster_exporter
+URL:            https://github.com/ClusterLabs/ha_cluster_exporter
 Source:         %{name}-%{version}.tar.gz
 Source1:        vendor.tar.gz
-ExclusiveArch:  aarch64 x86_64 ppc64le s390x
-BuildRoot:      %{_tmppath}/%{name}-%{version}-build
-BuildRequires:  go >= 1.11
+BuildRequires:  golang(API) >= 1.20
+Requires(post): %fillup_prereq
 Provides:       ha_cluster_exporter = %{version}-%{release}
 Provides:       prometheus(ha_cluster_exporter) = %{version}-%{release}
-# Unlike C/C++ packages, Golang packages do not have header files. They are statically built so the main package is also the devel package.
-Provides:       %{name}-devel = %{version}
-Provides:       %{name}-devel-static = %{version}
+ExclusiveArch:  aarch64 x86_64 ppc64le s390x
 
-# Make sure that the binary is not getting stripped.
-%undefine _build_create_debug
-%define __arch_install_post export NO_BRP_STRIP_DEBUG=true
+#Compat macro for new _fillupdir macro introduced in Nov 2017
+%if ! %{defined _fillupdir}
+  %define _fillupdir /var/adm/fillup-templates
+%endif
 
 %description
 Prometheus exporter for Pacemaker HA clusters metrics
@@ -49,7 +49,8 @@ Prometheus exporter for Pacemaker HA clusters metrics
 
 export CGO_ENABLED=0
 go build -mod=vendor \
-         -ldflags="-s -w -X main.version=%{version}" \
+         -buildmode=pie \
+         -ldflags="-s -w -X github.com/prometheus/common/version.Version=%{version}" \
          -o %{shortname}
 
 %install
@@ -60,6 +61,9 @@ install -D -m 0755 %{shortname} "%{buildroot}%{_bindir}/%{shortname}"
 # Install the systemd unit
 install -D -m 0644 %{shortname}.service %{buildroot}%{_unitdir}/%{name}.service
 
+# Install the environment file
+install -D -m 0644 %{shortname}.sysconfig %{buildroot}%{_fillupdir}/sysconfig.%{name}
+
 # Install compat wrapper for legacy init systems
 install -Dd -m 0755 %{buildroot}%{_sbindir}
 ln -s /usr/sbin/service %{buildroot}%{_sbindir}/rc%{name}
@@ -69,6 +73,7 @@ ln -s /usr/sbin/service %{buildroot}%{_sbindir}/rc%{name}
 
 %post
 %service_add_post %{name}.service
+%fillup_only -n %{name}
 
 %preun
 %service_del_preun %{name}.service
@@ -77,7 +82,6 @@ ln -s /usr/sbin/service %{buildroot}%{_sbindir}/rc%{name}
 %service_del_postun %{name}.service
 
 %files
-%defattr(-,root,root)
 %doc *.md
 %doc doc/*
 %if 0%{?suse_version} >= 1500
@@ -87,6 +91,7 @@ ln -s /usr/sbin/service %{buildroot}%{_sbindir}/rc%{name}
 %endif
 %{_bindir}/%{shortname}
 %{_unitdir}/%{name}.service
+%{_fillupdir}/sysconfig.%{name}
 %{_sbindir}/rc%{name}
 
 %changelog

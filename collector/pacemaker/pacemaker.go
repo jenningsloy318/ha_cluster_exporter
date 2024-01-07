@@ -10,24 +10,28 @@ import (
 	"github.com/ClusterLabs/ha_cluster_exporter/collector/pacemaker/cib"
 	"github.com/ClusterLabs/ha_cluster_exporter/collector/pacemaker/crmmon"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
-	log "github.com/sirupsen/logrus"
 )
 
-func NewCollector(crmMonPath string, cibAdminPath string) (*pacemakerCollector, error) {
+const subsystem = "pacemaker"
+
+func NewCollector(crmMonPath string, cibAdminPath string, timestamps bool, logger log.Logger) (*pacemakerCollector, error) {
 	err := collector.CheckExecutables(crmMonPath, cibAdminPath)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not initialize Pacemaker collector")
+		return nil, errors.Wrapf(err, "could not initialize '%s' collector", subsystem)
 	}
 
 	c := &pacemakerCollector{
-		collector.NewDefaultCollector("pacemaker"),
+		collector.NewDefaultCollector(subsystem, timestamps, logger),
 		crmmon.NewCrmMonParser(crmMonPath),
 		cib.NewCibAdminParser(cibAdminPath),
 	}
-	c.SetDescriptor("nodes", "The nodes in the cluster; one line per name, per status", []string{"node", "type", "status"})
-	c.SetDescriptor("resources", "The resources in the cluster; one line per id, per status", []string{"node", "resource", "role", "managed", "status", "agent", "group", "clone"})
+	c.SetDescriptor("nodes", "The status of each node in the cluster; 1 means the node is in that status, 0 otherwise", []string{"node", "type", "status"})
+	c.SetDescriptor("node_attributes", "Metadata attributes of each node; value is always 1", []string{"node", "name", "value"})
+	c.SetDescriptor("resources", "The status of each resource in the cluster; 1 means the resource is in that status, 0 otherwise", []string{"node", "resource", "role", "managed", "status", "agent", "group", "clone"})
 	c.SetDescriptor("stonith_enabled", "Whether or not stonith is enabled", nil)
 	c.SetDescriptor("fail_count", "The Fail count number per node and resource id", []string{"node", "resource"})
 	c.SetDescriptor("migration_threshold", "The migration_threshold number per node and resource id", []string{"node", "resource"})
@@ -43,23 +47,22 @@ type pacemakerCollector struct {
 	cibParser    cib.Parser
 }
 
-func (c *pacemakerCollector) Collect(ch chan<- prometheus.Metric) {
-	log.Debugln("Collecting pacemaker metrics...")
+func (c *pacemakerCollector) CollectWithError(ch chan<- prometheus.Metric) error {
+	level.Debug(c.Logger).Log("msg", "Collecting pacemaker metrics...")
 
 	crmMon, err := c.crmMonParser.Parse()
 	if err != nil {
-		log.Warnf("Pacemaker Collector scrape failed: %s", err)
-		return
+		return errors.Wrap(err, "crm_mon parser error")
 	}
 
 	CIB, err := c.cibParser.Parse()
 	if err != nil {
-		log.Warnf("Pacemaker Collector scrape failed: %s", err)
-		return
+		return errors.Wrap(err, "cibadmin parser error")
 	}
 
 	c.recordStonithStatus(crmMon, ch)
 	c.recordNodes(crmMon, ch)
+	c.recordNodeAttributes(crmMon, ch)
 	c.recordResources(crmMon, ch)
 	c.recordFailCounts(crmMon, ch)
 	c.recordMigrationThresholds(crmMon, ch)
@@ -67,7 +70,18 @@ func (c *pacemakerCollector) Collect(ch chan<- prometheus.Metric) {
 
 	err = c.recordCibLastChange(crmMon, ch)
 	if err != nil {
-		log.Warnf("Pacemaker Collector scrape failed: %s", err)
+		return errors.Wrap(err, "could not record CIB last change")
+	}
+
+	return nil
+}
+
+func (c *pacemakerCollector) Collect(ch chan<- prometheus.Metric) {
+	level.Debug(c.Logger).Log("msg", "Collecting pacemaker metrics...")
+
+	err := c.CollectWithError(ch)
+	if err != nil {
+		level.Warn(c.Logger).Log("msg", c.GetSubsystem()+" collector scrape failed", "err", err)
 	}
 }
 
@@ -82,14 +96,6 @@ func (c *pacemakerCollector) recordStonithStatus(crmMon crmmon.Root, ch chan<- p
 
 func (c *pacemakerCollector) recordNodes(crmMon crmmon.Root, ch chan<- prometheus.Metric) {
 	for _, node := range crmMon.Nodes {
-		var nodeType string
-		switch node.Type {
-		case "member", "ping", "remote":
-			nodeType = node.Type
-			break
-		default:
-			nodeType = "unknown"
-		}
 
 		// this is a map of boolean flags for each possible status of the node
 		nodeStatuses := map[string]bool{
@@ -105,11 +111,13 @@ func (c *pacemakerCollector) recordNodes(crmMon crmmon.Root, ch chan<- prometheu
 		}
 
 		// since we have a combined cardinality of node * status, we cycle through all the possible statuses
-		// and we record a new metric if the flag for that status is on
+		// and we record a metric for each one
 		for nodeStatus, flag := range nodeStatuses {
+			var statusValue float64
 			if flag {
-				ch <- c.MakeGaugeMetric("nodes", float64(1), node.Name, nodeType, nodeStatus)
+				statusValue = 1
 			}
+			ch <- c.MakeGaugeMetric("nodes", statusValue, node.Name, node.Type, nodeStatus)
 		}
 	}
 }
@@ -119,8 +127,16 @@ func (c *pacemakerCollector) recordResources(crmMon crmmon.Root, ch chan<- prome
 		c.recordResource(resource, "", "", ch)
 	}
 	for _, clone := range crmMon.Clones {
+		recorded := make(map[crmmon.Resource]bool) // we need to track cloned resources to avoid duplicates
 		for _, resource := range clone.Resources {
+			// Avoid recording stopped cloned resources multiple times
+			if recorded[resource] == true {
+				continue
+			}
+
 			c.recordResource(resource, "", clone.Id, ch)
+
+			recorded[resource] = true
 		}
 	}
 	for _, group := range crmMon.Groups {
@@ -139,23 +155,22 @@ func (c *pacemakerCollector) recordResource(resource crmmon.Resource, group stri
 		"blocked":         resource.Blocked,
 		"failed":          resource.Failed,
 		"failure_ignored": resource.FailureIgnored,
-		// if no status flag is active we record an empty status; probably a stopped resource, which is tracked in the "role" label instead
-		"": !(resource.Active || resource.Orphaned || resource.Blocked || resource.Failed || resource.FailureIgnored),
+	}
+
+	var nodeName string
+	if resource.Node != nil {
+		nodeName = resource.Node.Name
 	}
 
 	// since we have a combined cardinality of resource * status, we cycle through all the possible statuses
 	// and we record a new metric if the flag for that status is on
 	for resourceStatus, flag := range resourceStatuses {
-		if !flag {
-			continue
+		var statusValue float64
+		if flag {
+			statusValue = 1
 		}
-		var nodeName string
-		if resource.Node != nil {
-			nodeName = resource.Node.Name
-		}
-		ch <- c.MakeGaugeMetric(
-			"resources",
-			float64(1),
+
+		labels := []string{
 			nodeName,
 			resource.Id,
 			strings.ToLower(resource.Role),
@@ -163,12 +178,15 @@ func (c *pacemakerCollector) recordResource(resource crmmon.Resource, group stri
 			resourceStatus,
 			resource.Agent,
 			group,
-			clone)
+			clone,
+		}
+
+		ch <- c.MakeGaugeMetric("resources", statusValue, labels...)
 	}
 }
 
 func (c *pacemakerCollector) recordFailCounts(crmMon crmmon.Root, ch chan<- prometheus.Metric) {
-	for _, node := range crmMon.NodeHistory.Node {
+	for _, node := range crmMon.NodeHistory.Nodes {
 		for _, resHistory := range node.ResourceHistory {
 			failCount := float64(resHistory.FailCount)
 
@@ -195,7 +213,7 @@ func (c *pacemakerCollector) recordCibLastChange(crmMon crmmon.Root, ch chan<- p
 }
 
 func (c *pacemakerCollector) recordMigrationThresholds(crmMon crmmon.Root, ch chan<- prometheus.Metric) {
-	for _, node := range crmMon.NodeHistory.Node {
+	for _, node := range crmMon.NodeHistory.Nodes {
 		for _, resHistory := range node.ResourceHistory {
 			ch <- c.MakeGaugeMetric("migration_threshold", float64(resHistory.MigrationThreshold), node.Name, resHistory.Name)
 		}
@@ -216,5 +234,13 @@ func (c *pacemakerCollector) recordConstraints(CIB cib.Root, ch chan<- prometheu
 		}
 
 		ch <- c.MakeGaugeMetric("location_constraints", constraintScore, constraint.Id, constraint.Node, constraint.Resource, strings.ToLower(constraint.Role))
+	}
+}
+
+func (c *pacemakerCollector) recordNodeAttributes(crmMon crmmon.Root, ch chan<- prometheus.Metric) {
+	for _, node := range crmMon.NodeAttributes.Nodes {
+		for _, attr := range node.Attributes {
+			ch <- c.MakeGaugeMetric("node_attributes", 1, node.Name, attr.Name, attr.Value)
+		}
 	}
 }
