@@ -34,12 +34,12 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/trento-project/continuous-delivery:0.1.0
+      image: ghcr.io/trento-project/continuous-delivery:0.1.x
       options: -u 0:0
       env:
         OBS_USER: ${{ secrets.OBS_USER }}
         OBS_PASS: ${{ secrets.OBS_PASS }}
-        OBS_PROJECT: ${{ secrets.OBS_PROJECT }}
+        OBS_PROJECT: ${{ vars.OBS_PROJECT }}
         REVISION: ${{ github.sha }}
         REPOSITORY: ${{ github.repository }}
         GITHUB_OAUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

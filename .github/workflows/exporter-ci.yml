@@ -45,7 +45,7 @@ jobs:
           for FILE in build/bin/*; do
             gzip $FILE
           done
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: ha_cluster_exporter
           path: build/bin
@@ -55,12 +55,12 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/trento-project/continuous-delivery:0.1.0
+      image: ghcr.io/trento-project/continuous-delivery:0.1.x
       options: -u 0:0
       env:
         OBS_USER: ${{ secrets.OBS_USER }}
         OBS_PASS: ${{ secrets.OBS_PASS }}
-        OBS_PROJECT: ${{ secrets.OBS_PROJECT }}
+        OBS_PROJECT: ${{ vars.OBS_PROJECT }}
         REVISION: ${{ github.sha }}
         REPOSITORY: ${{ github.repository }}
         GITHUB_OAUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -68,8 +68,8 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - name: configure OSC
-        run: /scripts/init_osc_creds.sh
+      - run: /scripts/init_osc_creds.sh
+      - run: git config --global --add safe.directory $(pwd)
       - run: make exporter-obs-commit
 
   obs-submit-request:
@@ -77,14 +77,14 @@ jobs:
     if: github.event.release
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/trento-project/continuous-delivery:0.1.0
+      image: ghcr.io/trento-project/continuous-delivery:0.1.x
       options: -u 0:0
       env:
         OBS_USER: ${{ secrets.OBS_USER }}
         OBS_PASS: ${{ secrets.OBS_PASS }}
-        OBS_PROJECT: ${{ secrets.OBS_PROJECT }}
+        OBS_PROJECT: ${{ vars.OBS_PROJECT }}
         PACKAGE_NAME: prometheus-ha_cluster_exporter
-        TARGET_PROJECT: ${{ secrets.OBS_DOWNSTREAM_PROJECT }}
+        TARGET_PROJECT: ${{ vars.OBS_DOWNSTREAM_PROJECT }}
         REVISION: ${{ github.event.release.tag_name }}
         REPOSITORY: ${{ github.repository }}
         GITHUB_OAUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -92,8 +92,8 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - name: configure OSC
-        run: /scripts/init_osc_creds.sh
+      - run: /scripts/init_osc_creds.sh
+      - run: git config --global --add safe.directory $(pwd)
       - run: make exporter-obs-workdir
       - run: make exporter-obs-changelog
       - run: make exporter-obs-commit
@@ -104,7 +104,7 @@ jobs:
     if: github.event.release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4.1.7
+      - uses: actions/download-artifact@v4
         with:
           name: ha_cluster_exporter
       - uses: softprops/action-gh-release@v1
